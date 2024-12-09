@@ -5,6 +5,9 @@ from kubernetes import client, config
 from openai import OpenAI
 from dotenv import load_dotenv
 
+# load .env file if it exists
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
@@ -13,33 +16,26 @@ logging.basicConfig(
     filemode="a",
 )
 
-app = Flask(__name__)
-
-# load .env file if it exists
-load_dotenv()
+# configure openai client
+openai = OpenAI()
 
 # configure kube client
 config.load_kube_config()
 
-# configure openai client
-openai = OpenAI()
 
+app = Flask(__name__)
 
 @app.route("/query", methods=["POST"])
 def create_query():
-    # todo: use query request too
+    class QueryRequest(BaseModel):
+        query: str
 
-    # response model
     class QueryResponse(BaseModel):
         query: str
         answer: str
 
     try:
-        # Extract the question from the request data
-        request_data = request.json
-        query = request_data.get("query")
-
-        # Log the question
+        query = QueryRequest.model_validate(request.json).query
         logging.info(f"Received query: {query}")
 
         prompt = f"""
