@@ -1,0 +1,8 @@
+# ignore virtual environment folder
+/.venv
+
+# ignore .env files
+.env
+
+# ignore log files
+*.log

@@ -1,3 +1,6 @@
-requests
-Flask
-pydantic
+Flask==3.1.0
+kubernetes==31.0.0
+openai==1.57.0
+pydantic==2.10.3
+python-dotenv==1.0.1
+requests==2.32.3
