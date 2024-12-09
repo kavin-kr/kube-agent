@@ -1,6 +1,7 @@
 import logging
 from flask import Flask, request, jsonify
-from pydantic import BaseModel, ValidationError
+import kubernetes
+from pydantic import BaseModel, Field, ValidationError
 from kubernetes import client, config
 import openai
 from dotenv import load_dotenv
@@ -19,11 +20,10 @@ logging.basicConfig(
 # Configure Kubernetes client
 config.load_kube_config()
 
-# Define a function for Kubernetes API calls
-def kubernetes_api_call(api_class: str, method: str, params: dict):
+def call_kubernetes_api(api_class: str, method: str, params: dict):
     logging.info(f"Kubernetes API call: {api_class}.{method}({params})")
     try:
-        api_instance = getattr(client, api_class)()
+        api_instance = getattr(kubernetes.client, api_class)()
         api_method = getattr(api_instance, method)
         result = api_method(**params).to_dict()
         logging.info(f"Kubernetes API result: {result}")
@@ -33,11 +33,13 @@ def kubernetes_api_call(api_class: str, method: str, params: dict):
         logging.error(f"Kubernetes API error: {e}")
         return {"error": str(e)}
 
+
 # Define the schema for OpenAI function calling
-kubernetes_api_call_schema = [
-    {
-        "name": "kubernetes_api_call",
-        "description": "Execute a Kubernetes API call.",
+call_kubernetes_api_schema = {
+    "type": "function",
+    "function": {
+        "name": "call_kubernetes_api",
+        "description": "Execute a Kubernetes API call using Kubernetes Python Clien library with the specified api_class, method, and parameters and return the result.", # todo
         "parameters": {
             "type": "object",
             "properties": {
@@ -47,17 +49,18 @@ kubernetes_api_call_schema = [
                 },
                 "method": {
                     "type": "string",
-                    "description": "The method to call on the specified class.",
+                    "description": "The method to call on the specified api_class (e.g., list_namespaced_pod, read_namespaced_pod).",
                 },
                 "params": {
                     "type": "object",
-                    "description": "The parameters required for the method.",
+                    "description": "The function parameters that needs to be passed to this api_class's method. If no parameters are needed, provide an empty object ({}). (e.g., {'namespace': 'default'}).",
                 },
             },
             "required": ["api_class", "method", "params"],
         },
-    }
-]
+    },
+}
+
 
 # Fine-tuned system prompt for GPT
 SYSTEM_PROMPT = """
@@ -72,6 +75,8 @@ Your responsibilities:
 6. Provide concise, accurate answers without additional explanations or context.
 7. Avoid identifiers in answers (e.g., return 'mongodb' instead of 'mongodb-56c598c8fc').
 8. If you cannot answer, respond with 'I don't know.'
+9. If there are list of items, return a comma separated list (e.g., 'item1, item2, item3').
+10. If there are multiple answers, return the most relevant one.
 
 Example Queries and Responses:
 Q: 'Which pod is spawned by my-deployment?' A: 'my-pod'
@@ -81,6 +86,7 @@ Q: 'How many nodes are there in the cluster?' A: '2'
 
 # Flask app initialization
 app = Flask(__name__)
+
 
 @app.route("/query", methods=["POST"])
 def create_query():
@@ -94,7 +100,7 @@ def create_query():
     try:
         # Step 1: Extract user query
         query = QueryRequest.model_validate(request.json).query
-        logging.info(f"Received query: {query}")
+        logging.info(f"Received user query: {query}")
 
         # Step 2: Define messages with refined system prompt
         messages = [
@@ -102,14 +108,21 @@ def create_query():
             {"role": "user", "content": query},
         ]
 
-        while True:
+        max_attempts = 2
+        attempts = 0
+
+        while attempts < max_attempts:
+            attempts += 1
+
             # Step 3: Send query to GPT with function calling enabled
             response = openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                functions=kubernetes_api_call_schema,
-                function_call="auto",
+                tools=[call_kubernetes_api_schema],
+                tool_choice="auto",
             )
+
+            logging.info(f"OpenAI response: {response}")
 
             # Step 4: Handle GPT response
             if response.choices[0].finish_reason == "stop":
@@ -119,36 +132,47 @@ def create_query():
                 response_model = QueryResponse(query=query, answer=final_answer)
                 return jsonify(response_model.model_dump())
 
-            elif response.choices[0].finish_reason == "function_call":
+            elif response.choices[0].finish_reason == "tool_calls":
                 # Extract function call details
-                function_call = response.choices[0].message.function_call
-                function_name = function_call.name
-                arguments = eval(function_call.arguments)
+                function = response.choices[0].message.tool_calls[0].function
+                function_name = function.name
+                arguments = eval(function.arguments)
 
-                logging.info(f"Function call requested: {function_name} with arguments {arguments}")
+                logging.info(
+                    f"Function call requested: {function_name} with arguments {arguments}"
+                )
 
-                if function_name == "kubernetes_api_call":
+                if function_name == "call_kubernetes_api":
                     # Validate arguments
                     api_class = arguments.get("api_class")
                     method = arguments.get("method")
                     params = arguments.get("params", {})
 
                     if not api_class or not method:
-                        raise ValueError("Missing required keys 'api_class' or 'method'.")
+                        raise ValueError(
+                            "Missing required keys 'api_class' or 'method'."
+                        )
 
                     # Execute Kubernetes API call
-                    raw_result = kubernetes_api_call(api_class, method, params)
+                    raw_result = call_kubernetes_api(api_class, method, params)
                     logging.info(f"Raw Kubernetes API result: {raw_result}")
 
                     # Append raw result for further processing by GPT
-                    messages.append({
-                        "role": "function",
-                        "name": function_name,
-                        "content": str(raw_result),
-                    })
+                    messages.append(
+                        {
+                            "role": "function",
+                            "name": function_name,
+                            "content": str(raw_result),
+                        }
+                    )
 
             else:
                 raise ValueError("Unexpected finish_reason in GPT response.")
+
+        # If max attempts exceeded, return an error message
+        error_message = f"Query could not be resolved within {max_attempts} attempts."
+        logging.error(error_message)
+        return jsonify({"error": error_message}), 500
 
     except ValidationError as e:
         return jsonify({"error": e.errors()}), 400
