@@ -5,25 +5,66 @@ from kubernetes import client, config
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# load .env file if it exists
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s - %(message)s",
     filename="agent.log",
-    filemode="a",
+    filemode="w",
 )
 
-# configure openai client
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+
 openai = OpenAI()
 
-# configure kube client
 config.load_kube_config()
 
 
+def kubernetes_api_call(api_class: str, method: str, params: dict):
+    logger.info(f"Kubernetes API call: {api_class}.{method}({params})")
+    try:
+        api_instance = getattr(client, api_class)()
+        api_method = getattr(api_instance, method)
+        result = api_method(**params).to_dict()
+        logger.info(f"Kubernetes API result: {result}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error during Kubernetes API call: {e}")
+        return {"error": str(e)}
+
+kubernetes_api_call_schema = [
+    {
+        "name": "kubernetes_api_call",
+        "description": "Execute a Kubernetes API call.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "api_class": {
+                    "type": "string",
+                    "description": "The Kubernetes Python client class to use (e.g., CoreV1Api, AppsV1Api).",
+                },
+                "method": {
+                    "type": "string",
+                    "description": "The method to call on the specified class.",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "The parameters required for the method.",
+                },
+            },
+            "required": ["api_class", "method", "params"],
+        },
+    }
+]
+
+
+
 app = Flask(__name__)
+
 
 @app.route("/query", methods=["POST"])
 def create_query():
@@ -36,76 +77,60 @@ def create_query():
 
     try:
         query = QueryRequest.model_validate(request.json).query
-        logging.info(f"Received query: {query}")
+        logger.info(f"Received query: {query}")
 
-        prompt = f"""
-        You are an assistant that translates natural language queries into Kubernetes Python client API calls.
-        For the query: "{query}", provide:
-        1. The Kubernetes Python client class to use (e.g., CoreV1Api, AppsV1Api).
-        2. The method to call on that class.
-        3. The parameters required for the method.
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that translates natural language queries into Kubernetes API calls.",
+            },
+            {"role": "user", "content": query},
+        ]
 
-        Example output format:
-        {{
-            "api_class": "CoreV1Api",
-            "method": "list_namespaced_pod",
-            "params": {{"namespace": "default"}}
-        }}
-        """
-        gpt_response = openai.chat.completions.create(
-            model="gpt-4o-mini",  # or "gpt-4"
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0,
-        )
-        
-        gpt_instructions = eval(gpt_response.choices[0].message.content)  # Convert string to dict
+        while True:
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                functions=kubernetes_api_call_schema,
+                function_call="auto",
+            )
 
-        # Extract details from GPT response
-        api_class_name = gpt_instructions["api_class"]
-        method_name = gpt_instructions["method"]
-        params = gpt_instructions["params"]
+            if response.choices[0].finish_reason == "stop":
+                final_answer = response.choices[0].message.content
+                logger.info(f"Final Answer from GPT: {final_answer}")
+                response_model = QueryResponse(query=query, answer=final_answer)
+                return jsonify(response_model.model_dump())
 
-        logging.info(f"GPT Instructions: {gpt_instructions}")
+            elif response.choices[0].finish_reason == "function_call":
+                function_call = response.choices[0].message.function_call
+                function_name = function_call.name
+                arguments = eval(function_call.arguments)
 
-        # Step 3: Dynamically get the Kubernetes API class and execute the method
-        api_class = getattr(client, api_class_name)()  # Dynamically get API class (e.g., AppsV1Api)
-        method = getattr(api_class, method_name)  # Get method dynamically from Kubernetes client class
-        raw_result = method(**params)  # Execute method with provided parameters
+                logger.info(
+                    f"Function call requested: {function_name} with arguments {arguments}"
+                )
 
-        # Step 4: Use GPT for post-processing of the result
-        post_process_prompt = f"""
-        Based on the original query: "{query}" and the following Kubernetes API response:
-        
-        Response: {raw_result}
+                if function_name == "kubernetes_api_call":
+                    raw_result = kubernetes_api_call(
+                        api_class=arguments["api_class"],
+                        method=arguments["method"],
+                        params=arguments.get("params", {}),
+                    )
 
-        Provide a clear and concise answer to the query.
-        """
-        
-        post_process_response = openai.chat.completions.create(
-            model="gpt-4o-mini",  # or "gpt-4"
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": post_process_prompt}
-            ],
-            max_tokens=200,
-            temperature=0,
-        )
-        
-        answer = post_process_response.choices[0].message.content
+                    logger.info(f"Raw Kubernetes API result: {raw_result}")
 
-        # Log the answer
-        logging.info(f"Generated answer: {answer}")
+                    messages.append(
+                        {
+                            "role": "function",
+                            "name": function_name,
+                            "content": str(raw_result),
+                        }
+                    )
+                else:
+                    raise ValueError(f"Unexpected function call in GPT response - {function_name}")
 
-        # Create the response model
-        response = QueryResponse(query=query, answer=str(answer))
-
-        print(response)
-
-        return jsonify(response.dict())
+            else:
+                raise ValueError("Unexpected finish_reason in GPT response.")
 
     except ValidationError as e:
         return jsonify({"error": e.errors()}), 400
