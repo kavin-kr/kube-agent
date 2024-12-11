@@ -2,7 +2,7 @@ import json
 import logging
 from flask import Flask, request, jsonify
 import kubernetes
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from kubernetes import config
 import openai
 from dotenv import load_dotenv
@@ -52,35 +52,75 @@ def call_kubernetes_api(api_class: str, method: str, params: dict):
         return {"error": str(e)}
 
 
-# Define the schema for OpenAI function calling
-call_kubernetes_api_schema = {
-    "type": "function",
-    "function": {
-        "name": "call_kubernetes_api",
-        "description": "Dynamically call a Kubernetes API using the Kubernetes Python Client library and return the result. This function allows interaction with Kubernetes resources by specifying the API class, method, and parameters.",
-        "strict": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "api_class": {
-                    "type": "string",
-                    "description": "The name of the Kubernetes Python client API class to use for the API call. This must be a valid class from the Kubernetes Python client library (e.g., CoreV1Api for core resources like pods, nodes, or services; AppsV1Api for deployments or stateful sets). Refer to the Kubernetes Python client documentation for valid API classes. Examples include CoreV1Api, AppsV1Api, BatchV1Api, etc.",
-                },
-                "method": {
-                    "type": "string",
-                    "description": "The specific method to call on the provided `api_class`. This must be a valid method of the specified Kubernetes API class (e.g., list_namespaced_pod to list pods in a namespace, read_namespaced_pod to get details of a specific pod). Ensure that the method corresponds to an operation supported by the chosen API class. Refer to the Kubernetes Python client documentation for valid methods for each API class. Examples include list_namespaced_pod, read_namespaced_service, create_namespaced_deployment, etc.",
-                },
-                "params": {
-                    "type": "string",
-                    "description": 'A JSON object as string containing the parameters required for the specified `method` of the `api_class`. These parameters must match the arguments expected by the method in the Kubernetes Python client library. Provide all mandatory parameters as required by the method. For example, use `{}` if no parameters are needed, or provide specific parameters such as `{"name": "example-pod", "namespace": "default"}`. If no namespace is explicitly specified for namespaced APIs, default to `{"namespace": "default"}`. Refer to the Kubernetes Python client documentation for required and optional parameters for each method.',
-                },
-            },
-            "required": ["api_class", "method", "params"],
-            "additionalProperties": False,
-        },
-    },
-}
+class CallKubernetesAPI(BaseModel):
+    """
+    Dynamically call a Kubernetes API using the Kubernetes Python Client library and return the result.
+    This function allows interaction with Kubernetes resources by specifying the API class, method, and parameters.
+    """
 
+    api_class: str = Field(
+        ...,
+        description="""
+        The name of the Kubernetes Python client API class to use for the API call.
+        This must be a valid class from the Kubernetes Python client library (e.g., CoreV1Api for core resources like pods, nodes, or services; AppsV1Api for deployments or stateful sets).
+        Refer to the Kubernetes Python client documentation for valid API classes.
+        Examples include CoreV1Api, AppsV1Api, BatchV1Api, etc.
+        """,
+    )
+    method: str = Field(
+        ...,
+        description="""
+        The specific method to call on the provided `api_class`.
+        This must be a valid method of the specified Kubernetes API class (e.g., list_namespaced_pod to list pods in a namespace, read_namespaced_pod to get details of a specific pod).
+        Ensure that the method corresponds to an operation supported by the chosen API class.
+        Refer to the Kubernetes Python client documentation for valid methods for each API class.
+        Examples include list_namespaced_pod, read_namespaced_service, create_namespaced_deployment, etc.
+        """,
+    )
+    params: str | dict = Field(
+        ...,
+        description="""
+        A JSON object containing the parameters required for the specified `method` of the `api_class`.
+        These parameters must match the arguments expected by the method in the Kubernetes Python client library.
+        Provide all mandatory parameters as required by the method.
+        For example, use `{}` if no parameters are needed, or provide specific parameters such as `{"name": "example-pod", "namespace": "default"}`.
+        If no namespace is explicitly specified for namespaced APIs, default to `{"namespace": "default"}`. Refer to the Kubernetes Python client documentation for required and optional parameters for each method.
+        """,
+    )
+
+    @field_validator("params")
+    @classmethod
+    def validate_and_convert_params(cls, value):
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                raise ValueError("Invalid JSON string provided for 'params'.")
+        elif isinstance(value, dict):
+            return value
+        else:
+            raise TypeError(
+                "'params' must be either a dictionary or a valid JSON string."
+            )
+
+class CountItems(BaseModel):
+    """
+    Count the number of items in the Kubernetes API response.
+    This function is used for queries where the final answer is the counting items the Kubernetes list type of API response.
+    Counting list items from the Kubernetes API response requires many tokens, so it is handled separately.
+    For list type of queries, the response should contain the `items` field in the root of the json object with the CallKubernetesAPI object to fetch the count of items.
+    """
+    call_kubernetes_api: CallKubernetesAPI
+
+class OpenAIResponse(BaseModel):
+    """
+    Represents the response from the OpenAI API after hitting `stop` finish reason.
+    The response should contain any one of the following fields:
+    - `final_answer`: The final answer generated by the OpenAI API which will be directly returned as a response to the user query.
+    - `count_items`: For count items type of queries, this field will contain the CallKubernetesAPI object to fetch the count of items.
+    """
+    count_items: CountItems | None = Field(..., description="For count items type of queries, this field will contain the CallKubernetesAPI object to fetch the count of items.")
+    final_answer: str | None = Field(..., description="The final answer generated by the OpenAI API which will be directly returned as a response to the user query.")
 
 # Fine-tuned system prompt for GPT
 SYSTEM_PROMPT = """
@@ -97,7 +137,10 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
 
 #### Guidelines to solve the query
 1. Parse user queries into logical steps to find the needed data.
-2. If the required information is not availabe in the previous message contexts, determine the appropriate `api_class`, `method`, and `params` to call the Kubernetes API.
+2. For queries like "count items", directly determine and return:
+   - The required `api_class`, `method`, and `params` needed to make a single API call that retrieves a list of items.
+   - Ensure that these parameters are sufficient to fetch only relevant data using filtering options like `field_selector` or `label_selector`.
+3. If the required information is not availabe in the previous message contexts, determine the appropriate `api_class`, `method`, and `params` to call the Kubernetes API.
    - Use `field_selector` or `label_selector`, like `metadata.name`, `metadata.namespace` wherever possible in the params when to reduce unnecessary data in API responses.
    - Combine selectors when applicable for optimal filtering.
    - Minimize the number of API calls by batching requests or reusing data where possible.
@@ -132,12 +175,26 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
   Response: "Running"
 
 - Question: "How many nodes are there in the cluster?"
-  API Call: `{
-    "api_class": "CoreV1Api",
-    "method": "list_node",
-    "params": "{}"
+  Response: `{
+    "count_items": {
+      "call_kubernetes_api": {
+          "api_class": "CoreV1Api",
+          "method": "list_node",
+          "params": "{}"
+      }
+    }
   }`
-  Response: "2"
+
+- Question: "Count all deployments in namespace 'production'."
+  Response: `{
+    "count_items": {
+      "call_kubernetes_api": {
+        "api_class": "AppsV1Api",
+        "method": "list_namespaced_deployment",
+        "params": "{\"namespace\": \"production\"}"
+      }
+    }
+  }`
 """
 
 # Flask app initialization
@@ -162,15 +219,17 @@ def create_query():
             {"role": "user", "content": query},
         ]
 
-        max_attempts = 5
-        attempts = 0
-        while attempts < max_attempts:
-            attempts += 1
-
-            response = openai.chat.completions.create(
+        max_attempts = 11
+        for _ in range(max_attempts):
+            response = openai.beta.chat.completions.parse(
                 model="gpt-4o",
                 messages=messages,
-                tools=[call_kubernetes_api_schema],
+                tools=[
+                    openai.pydantic_function_tool(
+                        name=call_kubernetes_api.__name__, model=CallKubernetesAPI
+                    )
+                ],
+                response_format=OpenAIResponse,
                 tool_choice="auto",
                 temperature=0.1,
             ).choices[0]
@@ -178,32 +237,52 @@ def create_query():
             logger.info(f"OpenAI response: {response}")
 
             if response.finish_reason == "stop":
-                final_answer = response.message.content
-                logger.info(f"Final Answer from GPT: {final_answer}")
-                response_model = QueryResponse(query=query, answer=final_answer)
-                return jsonify(response_model.model_dump())
+                if response.message.parsed:
+                    openai_response = response.message.parsed
+                    if openai_response.final_answer:
+                        final_answer = openai_response.final_answer
+                        logger.info(f"Final Answer from GPT: {final_answer}")
+
+                        response_model = QueryResponse(query=query, answer=final_answer)
+                        return jsonify(response_model.model_dump())
+
+                    elif openai_response.count_items:
+                        count_items = openai_response.count_items
+                        logger.info(
+                            f"Count items API call: {count_items.call_kubernetes_api}"
+                        )
+
+                        kube_result = call_kubernetes_api(
+                            count_items.call_kubernetes_api.api_class,
+                            count_items.call_kubernetes_api.method,
+                            count_items.call_kubernetes_api.params,
+                        )
+                        count = len(json.loads(kube_result)["items"])
+                        final_answer = str(count)
+                        logger.info(f"Final Answer from GPT: {final_answer}")
+
+                        response_model = QueryResponse(query=query, answer=final_answer)
+                        return jsonify(response_model.model_dump())
+                else:
+                    logger.info(f"No parsed response from GPT.")
+                    return jsonify({"query": query, "result": "unknown"})
 
             elif response.finish_reason == "tool_calls":
                 messages.append(response.message)
 
                 for tool_call in response.message.tool_calls:
-                    function_name = tool_call.function.name
-                    if function_name != call_kubernetes_api.__name__:
-                        raise ValueError(f"Unexpected function call: {function_name}")
-
-                    function_arguments = json.loads(tool_call.function.arguments)
-                    api_class = function_arguments["api_class"]
-                    method = function_arguments["method"]
-                    params = json.loads(function_arguments["params"] or "{}")
-
-                    kube_result = call_kubernetes_api(api_class, method, params)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(kube_result, default=str),
-                        }
-                    )
+                    args = tool_call.function.parsed_arguments
+                    if isinstance(args, CallKubernetesAPI):
+                        kube_result = call_kubernetes_api(
+                            args.api_class, args.method, args.params
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(kube_result, default=str),
+                            }
+                        )
 
             else:
                 raise ValueError("Unexpected finish_reason in GPT response.")
