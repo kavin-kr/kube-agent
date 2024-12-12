@@ -171,6 +171,9 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
         - Combine selectors whenever applicable for optimal filtering.
     4. Provide a valid `jq_filter` to filter the API response to extract only the relevant information. Use filter expressions whenever possible to extract only the relevant information from the API response. For example, to extract the pod names from a list of pods, you can use the filter '.items[].metadata.name'. If no filtering is needed, provide `'.'` this as default. The `jq_filter` should be valid based on the API response structure. Refer kubernetes API documentation to understand the response structure.
     5. Make smart combination of `params` and appropriate `jq_filter` to get only the required data.
+        - While using `jq_filter` don't look for exact values, instead look for patterns or relationships to get the required data.
+        - Extract the needed files from the response in generic way, so that it can be processed to get the required data.
+        - The user query may not be directly related to the API response, so extract the needed data in a way that it can be processed to get the required data.
 3. Fetch the needed details from the cluster using the `call_kubernetes_api` function with the determined `api_class`, `method`, `params` and `jq_filter`.
     - Execute no more than 10 Kubernetes API calls per query.
     - If the query takes more than 10 calls, respond with `Not able to process the query due to API call limits`.
