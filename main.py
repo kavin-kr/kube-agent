@@ -1,5 +1,8 @@
+from calendar import c
+from enum import Enum
 import json
 import logging
+from typing import Literal
 from flask import Flask, request, jsonify
 import kubernetes
 from pydantic import BaseModel, Field, field_validator
@@ -17,9 +20,6 @@ load_dotenv()
 #     filename="agent.log",
 #     filemode="w",
 # )
-
-import logging
-import logging.handlers
 
 import logging.handlers
 
@@ -43,48 +43,44 @@ def call_kubernetes_api(api_class: str, method: str, params: dict):
         api_instance = getattr(kubernetes.client, api_class)()
         api_method = getattr(api_instance, method)
         result = api_method(**params)
-        result = json.dumps(result, default=str)
-        logger.info(f"Kubernetes API result: {result}")
+        logger.info(f"Kubernetes API result: {json.dumps(result, default=str)}")
         return result
 
     except Exception as e:
         logger.error(f"Kubernetes API error: {e}")
-        return {"error": str(e)}
+        return json.dumps({"error": str(e)})
 
 
 class CallKubernetesAPI(BaseModel):
     """
-    Dynamically call a Kubernetes API using the Kubernetes Python Client library and return the result.
-    This function allows interaction with Kubernetes resources by specifying the API class, method, and parameters.
+    Dynamically call a Kubernetes API using the Kubernetes Python Client library
+    by specifying the API class, method, and parameters and return the result.
     """
 
     api_class: str = Field(
         ...,
         description="""
         The name of the Kubernetes Python client API class to use for the API call.
-        This must be a valid class from the Kubernetes Python client library (e.g., CoreV1Api for core resources like pods, nodes, or services; AppsV1Api for deployments or stateful sets).
-        Refer to the Kubernetes Python client documentation for valid API classes.
-        Examples include CoreV1Api, AppsV1Api, BatchV1Api, etc.
+        This must be a valid class as documented in the Kubernetes Python client library.
+        (e.g., `CoreV1Api`, `AppsV1Api`)
         """,
     )
     method: str = Field(
         ...,
         description="""
         The specific method to call on the provided `api_class`.
-        This must be a valid method of the specified Kubernetes API class (e.g., list_namespaced_pod to list pods in a namespace, read_namespaced_pod to get details of a specific pod).
-        Ensure that the method corresponds to an operation supported by the chosen API class.
-        Refer to the Kubernetes Python client documentation for valid methods for each API class.
-        Examples include list_namespaced_pod, read_namespaced_service, create_namespaced_deployment, etc.
+        This must be a valid method of the specified Kubernetes API class as documented in the Kubernetes Python client library.
+        (e.g., `list_namespaced_pod`, `read_namespaced_service`)
         """,
     )
     params: str | dict = Field(
         ...,
         description="""
-        A JSON object containing the parameters required for the specified `method` of the `api_class`.
-        These parameters must match the arguments expected by the method in the Kubernetes Python client library.
-        Provide all mandatory parameters as required by the method.
-        For example, use `{}` if no parameters are needed, or provide specific parameters such as `{"name": "example-pod", "namespace": "default"}`.
-        If no namespace is explicitly specified for namespaced APIs, default to `{"namespace": "default"}`. Refer to the Kubernetes Python client documentation for required and optional parameters for each method.
+        A JSON object as a string containing the parameters required for the specified `method` of the `api_class`.
+        These parameters must be valid arguments of the specified `method` of the `api_class` as documented in the Kubernetes Python client library.
+        If no parameters are needed, provide an empty JSON object `{}`.
+        If no namespace is explicitly specified for namespaced APIs, default to `'{"namespace": "default"}'`.
+        (e.g., `{"name": "example-pod", "namespace": "default"}`, `{"label_selector": "component=etcd"}`).
         """,
     )
 
@@ -104,62 +100,133 @@ class CallKubernetesAPI(BaseModel):
             )
 
 
+class FinalAnswer(BaseModel):
+    """
+    Represents the final answer to a user query, that can be sent back to the user.
+    """
+
+    answer: str
+
+
+class CountList(BaseModel):
+    """
+    Count the total number of items returned by each of the specified API calls and return that count as the final answer to the user.
+    """
+
+    count_items: CallKubernetesAPI
+
+
+class GetLogs(BaseModel):
+    """
+    Retrieve logs from the list of specified kubernetes log fetching API calls and return those logs as the final answer to the user.
+    """
+
+    fetch_log: CallKubernetesAPI
+
+
+class Error(BaseModel):
+    """
+    Represents a response where the query could not be resolved or error occurred.
+    """
+
+    message: str
+
+
+class OpenAIResponse(BaseModel):
+    """
+    Represents the response from the OpenAI API, which can include the final answer, a count list, or logs.
+    """
+
+    type: Literal["final_answer", "count_list", "get_logs", "error"]
+    data: FinalAnswer | CountList | GetLogs | Error
+
+
 # Fine-tuned system prompt for GPT
 SYSTEM_PROMPT = """
-You are a Kubernetes assistant designed to interact with a Kubernetes cluster to answer user queries about its deployed applications. Use the `call_kubernetes_api` function to dynamically fetch details from the cluster and provide concise, accurate answers based on results.
+You are a helpful Kubernetes assistant designed to interact with a Kubernetes cluster to answer user queries about its deployed applications. Use the `call_kubernetes_api` function to dynamically fetch details from the cluster and provide concise, accurate answers based on results.
 
 #### Function Details
 The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the Kubernetes Python Client library and returns the API call result. It takes three parameters:
-- `api_class (string)`: The Kubernetes Python client API class to use for the API call (e.g., `CoreV1Api`, `AppsV1Api`). This must be a valid class from the Kubernetes Python client library.
-- `method (string)`: The specific method to call on the specified `api_class` (e.g., `list_namespaced_pod`, `read_namespaced_pod`). This must be a valid method of the provided API class.
-- `params (JSON object as string)`:  A JSON object as a string containing the parameters required for the specified method. These parameters must match the arguments expected by the method in the Kubernetes Python client library. Provide all mandatory parameters required by the method. For example:
-  - Use `'{}'` if no parameters are needed.
-  - Provide specific parameters such as `'{"name": "example-pod", "namespace": "default"}'`.
-  - If no namespace is explicitly specified for namespaced APIs, default to `'{"namespace": "default"}'`.
+  1. `api_class (string)`: The name of the Kubernetes Python client API class to use for the API call. This must be a valid class as documented in the Python client library. (e.g., `CoreV1Api`, `AppsV1Api`)
+  2. `method (string)`: The specific method to call on the provided `api_class`. This must be a valid method of the specified Kubernetes API class as documented in the Kubernetes Python library. (e.g., `list_namespaced_pod`, `read_namespaced_service`)
+  3. `params (JSON object as string)`: A JSON object as a string containing the parameters required for the specified `method` of the `api_class`. These parameters must be valid arguments of the specified `method` of the `api_class` as documented in the Kubernetes Python client library. If no parameters are needed, provide an empty JSON object `{}`. If no namespace is explicitly specified for namespaced APIs, default to `'{"namespace": "default"}'`. (e.g., `{"name": "example-pod", "namespace": "default"}`, `{"label_selector": "component=etcd"}`). Refer to the Kubernetes Python client documentation for required and optional parameters for each method.
 
-#### Guidelines to solve the query
-1. Parse user queries into logical steps to find the needed data.
-2. If the required information is not availabe in the previous message contexts, determine the appropriate `api_class`, `method`, and `params` to call the Kubernetes API.
-   - Use `field_selector` or `label_selector`, like `metadata.name`, `metadata.namespace` wherever possible in the params when to reduce unnecessary data in API responses.
-   - Combine selectors when applicable for optimal filtering.
-   - Minimize the number of API calls by batching requests or reusing data where possible.
-   - For namespaced APIs, assume default namespace unless explicitly stated otherwise.
-   - If scope remains unclear after applying defaults, respond with `Not able to process the query`.
-3. Call `call_kubernetes_api` with appropriate and valid `api_class`, `method`, and `params` as per the Kubernetes Python client library documentation.
-  - Execute no more than 10 Kubernetes API calls per query.
-  - If the query takes more than 10 calls, respond with `Not able to process the query due to API call limits`.
-4. Process results of API calls to generate concise answers without additional explanations or context:
-   - Provide single-word, numeric, or concise answers with just enough information to answer the question, without forming a complete sentence whenever possible (e.g., 'Running', '3').
-   - For lists of items, return a comma-separated list (e.g., 'item1, item2, item3').
-   - Instead of using Kubernetes-generated suffixes in pod names or other identifiers, check if resources have meaningful labels like `app`, `component`, or similar, and use those as names.
-   - If no meaningful label exists, truncate Kubernetes-generated suffixes (e.g., return 'mongodb' instead of 'mongodb-56c598c8fc').
-5. When multiple answers are possible, return only the most relevant one.
+#### Steps to solve the user query
+1. Understand the user query
+   - Understand the context of the user query and the information requested by the user about the Kubernetes cluster.
+   - Determine the logical steps required to find the needed data.
+2. Identify the appropriate `api_class`, `method`, and `params` to call the Kubernetes API
+   1. Based on the user query and logical steps, determine the `api_class`, `method`, and `params` to get details from the cluster.
+   2. Ensure that the `api_class` and `method` are valid classes and methods from the Kubernetes Python client library.
+   3. Provide the necessary parameters in the `params` field to fetch the required information.
+      - If no parameters are needed, provide an empty JSON object `{}`.
+      - If the API requires a namespace, default to `'{"namespace": "default"}'` if not explicitly specified.
+      - Use `field_selector` or `label_selector` like `metadata.name`, `metadata.namespace` wherever possible in the params to reduce fetching unnecessary data in API responses.
+      - Combine selectors whenever applicable for optimal filtering.
+3. Now based on the type of query, return the appropriate response in the expected strucutred outputs schema format:
+    1. If the query's answer type is to just count the number of items in api response, then
+      - Don't make any internal function calls to count the items.
+      - return output type as `count_list`
+      - return output data as `CountList` type with the `api_class`, `method`, and `params` requried to count the items as per the query.
+      - IMPORTANT: Ensure that the `api_class`, `method`, and `params` are valid as documented in the Kubernetes Python client library.
+    2. If the query's answer type is to just fetch the logs of a pod, then
+      - Don't make any internal function calls to count the items.
+      - return output type as `get_logs`
+      - return output data as `GetLogs` type with with the `api_class`, `method`, and `params` requried to get logs as per the query.
+      - IMPORTANT: Ensure that the `api_class`, `method`, and `params` are valid as documented in the Kubernetes Python client library.
+    3. For all other queries
+      1. Fetch the needed details from the cluster using the `call_kubernetes_api` function with the determined `api_class`, `method`, and `params`.
+         - Execute no more than 10 Kubernetes API calls per query.
+         - If the query takes more than 10 calls, respond with `Not able to process the query due to API call limits`.
+         - Minimize the number of API calls by batching requests or reusing data where possible.
+      2. Process the API response to generate a concise answers without additional explanations or context and output the return type as `final_answer`. Follow the below guidelines to generate the answer:
+         - Provide single-word, numeric, or concise answers with just enough information to answer the question, without forming a complete sentence whenever possible (e.g., 'Running', '3').
+         - For lists of items, return a comma-separated list (e.g., 'item1, item2, item3').
+         - Instead of using Kubernetes-generated suffixes in pod names or other identifiers, check if resources have meaningful labels like `app`, `component`, or similar, and use those as names.
+         - If no meaningful label exists, truncate Kubernetes-generated suffixes (e.g., return 'mongodb' instead of 'mongodb-56c598c8fc').
+         - When multiple answers are possible, return only the most relevant one.
+    4. If the query could not be processed or any error occurs return `Not able to process the query`.
 
 
 #### Example Queries and Responses
 - Question: "Which pod is spawned by my-deployment?"
-  API Call: `{
+  call_kubernetes_api function call params: `{
     "api_class": "AppsV1Api",
     "method": "list_namespaced_deployment",
     "params": "{\"name\": \"my-deployment\", \"namespace\": \"default\"}"
   }`
-  Response: "my-pod"
+  Response: `{
+    "type": "final_answer",
+    "data": {
+      "answer": "my-pod"
+    }
+  }`
 
 - Question: "What is the status of the pod named example-pod?"
-  API Call: `{
+  call_kubernetes_api function call params: `{
     "api_class": "CoreV1Api",
     "method": "read_namespaced_pod",
     "params": "{\"name\": \"example-pod\", \"namespace\": \"default\"}"
   }`
-  Response: "Running"
-
-- Question: "How many nodes are there in the cluster?"
-  API Call: `{
-    "api_class": "CoreV1Api",
-    "method": "list_node",
-    "params": "{}"
+  Response: `{
+    "type": "final_answer",
+    "data": {
+      "answer": "running"
+    }
   }`
-  Response: "2"
+
+- Question: "How many pods are there in the cluster?"
+  (don't need to fetch the exact number of nodes, just return the call_kubernetes_api details)
+  Response: `{
+    "type": "count_list",
+    "data": {
+      "count_items_from_kubernetes_apis": [{
+        "api_class": "CoreV1Api",
+        "method": "list_pod_for_all_namespaces",
+        "params": {}
+      }]
+    }
+  }`
 """
 
 # Flask app initialization
@@ -196,15 +263,56 @@ def create_query():
                 ],
                 tool_choice="auto",
                 temperature=0.1,
+                response_format=OpenAIResponse,
             ).choices[0]
 
             logger.info(f"OpenAI response: {response}")
 
             if response.finish_reason == "stop":
-                final_answer = response.message.content
-                logger.info(f"Final Answer from GPT: {final_answer}")
-                response_model = QueryResponse(query=query, answer=final_answer)
-                return jsonify(response_model.model_dump())
+                openai_response = response.message.parsed
+                logger.info(f"OpenAI response: {openai_response}")
+
+                if openai_response.type == "final_answer" and isinstance(
+                    openai_response.data, FinalAnswer
+                ):
+                    final_answer = openai_response.data.answer
+                    response_model = QueryResponse(query=query, answer=final_answer)
+                    return jsonify(response_model.model_dump())
+
+                elif openai_response.type == "count_list" and isinstance(
+                    openai_response.data, CountList
+                ):
+                    call_kube_api = openai_response.data.count_items
+
+                    output = call_kubernetes_api(
+                        call_kube_api.api_class,
+                        call_kube_api.method,
+                        call_kube_api.params,
+                    )
+                    count = len(output.items) if output.items is not None else 0
+
+                    logger.info(f"Count List from GPT: {count}")
+                    response_model = QueryResponse(query=query, answer=str(count))
+                    return jsonify(response_model.model_dump())
+
+                elif openai_response.type == "get_logs" and isinstance(
+                    openai_response.data, GetLogs
+                ):
+                    get_logs = openai_response.data.fetch_log
+
+                    output = call_kubernetes_api(
+                        get_logs.api_class, get_logs.method, get_logs.params
+                    )
+
+                    response_model = QueryResponse(query=query, answer=output)
+                    return jsonify(response_model.model_dump())
+
+                elif openai_response.type == "error" and isinstance(
+                    openai_response.data, Error
+                ):
+                    error_message = openai_response.data.message
+                    logger.error(f"Error from GPT: {error_message}")
+                    return jsonify({"query": query, "result": "error"})
 
             elif response.finish_reason == "tool_calls":
                 messages.append(response.message)
@@ -221,6 +329,10 @@ def create_query():
                                 "tool_call_id": tool_call.id,
                                 "content": json.dumps(kube_result, default=str),
                             }
+                        )
+                    else:
+                        raise ValueError(
+                            f"Unexpected function call in GPT response: {tool_call}"
                         )
 
             else:
