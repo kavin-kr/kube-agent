@@ -41,7 +41,7 @@ config.load_kube_config()
 
 
 def call_kubernetes_api(api_class: str, method: str, params: dict, jq_filter: str):
-    logger.info(f"Kubernetes API call: {api_class}.{method}({params} with filter {jq_filter})")
+    logger.info(f"Kubernetes API call: {api_class}.{method}({params}) with filter {jq_filter}")
     try:
         api_instance = getattr(kubernetes.client, api_class)()
         api_method = getattr(api_instance, method)
@@ -95,9 +95,9 @@ class CallKubernetesAPI(BaseModel):
     jq_filter: str = Field(
         ...,
         description="""
-        A jq filter to apply to the API response to extract only the needed relevant information.
+        A jq filter to apply to the API response to extract the needed relevant information along with the metadata.
         This filter should be a valid jq filter string that can be applied to the API response.
-        Use filter expressions whenever possible to extract only the relevant information from the API response.
+        Use filter expressions whenever possible to extract the relevant information along with the metadata from the API response.
         For example, to extract the pod names from a list of pods, you can use the filter '.items[].metadata.name'.
         If no filtering is needed, provide `'.'` this as default.
         """,
@@ -157,7 +157,7 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
 
 3. `params (JSON object as string)`: A JSON object as a string containing the parameters required for the specified `method` of the `api_class`. These parameters must be valid arguments of the specified `method` of the `api_class` as documented in the Kubernetes Python client library. If no parameters are needed, provide an empty JSON object `{}`. If no namespace is explicitly specified use list for all namespace based APIs and filter that specific resource. (e.g., `{"name": "example-service"}`, `{"name": "example-pod", "namespace": "example-namespace"}`).
 
-4. `jq_filter (string)`: A jq filter to apply to the API response to extract only the needed relevant information. This filter should be a valid jq filter string that can be applied to the API response received using the specified `api_class`, `method` and `params`. Use filter expressions whenever possible to extract only the relevant information from the API response needed to answer the user query. For example:
+4. `jq_filter (string)`: A jq filter to apply to the API response to extract the relevant information along with its medata like names and labels. This filter should be a valid jq filter string that can be applied to the API response received using the specified `api_class`, `method` and `params`. Use filter expressions whenever possible the relevant information along with metadata from the API response needed to answer the user query. For example:
    - To extract pod names from a list of pods: `.items[].metadata.name`.
    - To count items: `.items | length`.
    - To filter all pods with specific name: `.items[] | select(.metadata.name | test("pod-name"))`.
@@ -186,11 +186,14 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
         - Make educated guesses for parameters when exact details are unavailable, ensuring inclusivity.
 
    2. **Generate a Valid jq Filter**:
-      - Use a jq filter to extract only relevant information from the Kubernetes API response.
+      - Use a jq filter to extract relevant information along with the metadata from the Kubernetes API response.
+      - NOTE: Always include metadata like names, labels, and other context information needed to answer the query.
       - **Guidelines for jq Filters**:
         - Ensure the jq output is always a valid JSON object or array.
+        - Always include the metadata for each resource and its nested resource which will be needed to answer the query (e.g., name, namespace, labels).
+        - Make sure to always include metadata, labels, and other context information like parent path in the filtered ouput along with the needed info so that those can be processed to answer the query. (e.g., for pods in a deployment, include deployment name, namespace, and labels).
         - Use jq operators like `map`, `select`, and functions like `contains`, `match`, or `test` for intelligent filtering.
-        - Apply optional (`?`) expressions in jq when dealing with optional fields to prevent errors (e.g., `.status.phase?`).
+        - Apply optional (`?`) expressions in jq whenever possible to make it failsafe (e.g., `.status.phase?`).
         - Avoid overly complex filters; optimize for simplicity and efficiency.
       - Examples of jq filters:
         - To extract pod names: `.items[].metadata.name`.
@@ -198,7 +201,6 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
         - To match patterns in names: `.items[] | select(.metadata.name | test("example-pattern")).metadata.name`.
 
    3. **Combine Parameters and jq Filters**:
-      - Make a smart combination of `params` and jq filters to retrieve only the required data.
       - Avoid exact value matches; instead, use patterns or relationships (e.g., regex matching with `test()` or partial matches with `contains()`).
       - Extract data generically so it can be processed further to answer user queries.
 
