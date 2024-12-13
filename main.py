@@ -1,19 +1,18 @@
-import json
-import logging
-from typing import Literal, Optional
-from flask import Flask, request, jsonify
-import kubernetes
-from pydantic import BaseModel, Field, field_validator
-from kubernetes import config
-import openai
 from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+from kubernetes import config
+from pydantic import BaseModel, Field, field_validator
 import jq
+import json
+import kubernetes
+import logging
+import logging.handlers
+import openai
 
 # Load environment variables
 load_dotenv()
 
-import logging.handlers
-
+# Configure logger
 logger = logging.getLogger()
 logger.level = logging.INFO
 
@@ -44,7 +43,9 @@ def call_kubernetes_api(api_class: str, method: str, params: dict, jq_filter: st
         logger.info(f"Kubernetes API result: {json.dumps(result, default=str)}")
 
         result = jq.compile(jq_filter).input(result).all()
-        logger.info(f"Kubernetes API filtered result: {json.dumps(result, default=str)}")
+        logger.info(
+            f"Kubernetes API filtered result: {json.dumps(result, default=str)}"
+        )
 
         return result
 
@@ -55,45 +56,37 @@ def call_kubernetes_api(api_class: str, method: str, params: dict, jq_filter: st
 
 class CallKubernetesAPI(BaseModel):
     """
-    Dynamically call a Kubernetes API using the Kubernetes Python Client library
-    by specifying the API class, method, and parameters and return the result.
+    Dynamically call a Kubernetes API using the Kubernetes Python Client library by specifying the API class, method, and parameters and return the result.
     """
 
     api_class: str = Field(
         ...,
         description="""
-        The name of the Kubernetes Python client API class to use for the API call.
-        This must be a valid class as documented in the Kubernetes Python client library.
+        The name of the Kubernetes Python client API class to use for the API call, which must be a valid class as documented in the Kubernetes Python client library.
         (e.g., `CoreV1Api`, `AppsV1Api`)
         """,
     )
     method: str = Field(
         ...,
         description="""
-        The specific method to call on the provided `api_class`.
-        This must be a valid method of the specified Kubernetes API class as documented in the Kubernetes Python client library.
+        The specific method to call on the provided `api_class`, which must be a valid method of the specified Kubernetes API class as documented in the Kubernetes Python client library
         (e.g., `list_namespaced_pod`, `read_namespaced_service`)
         """,
     )
     params: str | dict = Field(
         ...,
         description="""
-        A JSON object as a string containing the parameters required for the specified `method` of the `api_class`.
-        These parameters must be valid arguments of the specified `method` of the `api_class` as documented in the Kubernetes Python client library.
+        A JSON object as a string containing the parameters required for the specified `method` of the `api_class`, which must be valid arguments as documented in the Kubernetes Python client library.
         If no parameters are needed, provide an empty JSON object `{}`.
-        If no namespace is explicitly specified for namespaced APIs, default to `'{"namespace": "default"}'`.
-        (e.g., `{"name": "example-pod", "namespace": "default"}`, `{"label_selector": "component=etcd"}`).
+        (e.g., `{"name": "my-pod", "namespace": "my-namespace"}`).
         """,
     )
-
     jq_filter: str = Field(
         ...,
         description="""
-        A jq filter to apply to the API response to extract the needed relevant information along with the metadata.
-        This filter should be a valid jq filter string that can be applied to the API response.
-        Use filter expressions whenever possible to extract the relevant information along with the metadata from the API response.
-        For example, to extract the pod names from a list of pods, you can use the filter '.items[].metadata.name'.
+        A jq filter to extract relevant information and metadata from the API response. This filter should be a valid jq filter string that can be applied without errors. Use filter expressions to extract the necessary information and relevant metadata to answer the user query.
         If no filtering is needed, provide `'.'` this as default.
+        (e.g., '[.items[] | select(.metadata.name | test("my-deployment")) | pick(.metadata.name, .metadata.namespace, .metadata.labels, .spec.template.metadata, .spec.template.spec.containers)]').
         """,
     )
 
@@ -104,31 +97,29 @@ class CallKubernetesAPI(BaseModel):
             try:
                 return json.loads(value)
             except json.JSONDecodeError:
-                raise ValueError("Invalid JSON string provided for 'params'.")
-        elif isinstance(value, dict):
+                raise ValueError(f"Invalid JSON string for 'params' - {value}")
+        if isinstance(value, dict):
             return value
-        else:
-            raise TypeError(
-                "'params' must be either a dictionary or a valid JSON string."
-            )
+        raise TypeError("'params' must be a dictionary or a valid JSON string.")
 
 
 class ReadNamespacedPodLogParams(BaseModel):
     """
-    Represents the params to fetch logs for a specific pod or a container within a pod using `read_namespaced_pod_log` API.
+    Represents the parameters to fetch logs for a specific pod or a container within a pod using `read_namespaced_pod_log` method from Kubernetes Python Client library.
     The `optional_params` field can be used to provide additional parameters like container name, tail lines, etc.
     """
 
     pod_name: str = Field(..., description="The name of the pod to fetch logs for.")
     namespace: str = Field(..., description="The namespace of the pod.")
     optional_params: dict | None = Field(
-        ..., description="Optional parameters for fetching logs."
+        ...,
+        description="The optional parameters, such as container name and tail lines, to fetch logs based on the user query.",
     )
 
 
 class FetchLogs(BaseModel):
     """
-    Represents the logs fetched for a specific pod or container within a pod.
+    Represents the list of logs that need to be fetched for pods or containers within a pod.
     """
 
     list: list[ReadNamespacedPodLogParams]
@@ -136,7 +127,7 @@ class FetchLogs(BaseModel):
 
 class FinalAnswer(BaseModel):
     """
-    Represents the final answer to a user query, that can be sent back to the user.
+    Represents the final answer to a user query that can be sent back directly.
     """
 
     answer: str
@@ -152,10 +143,9 @@ class Error(BaseModel):
 
 class OpenAIResponse(BaseModel):
     """
-    Represents the response from the OpenAI API, which can include the final answer, a count list, or logs.
+    Represents the final response from the OpenAI API, which can be a final direct answer to the user, list of logs to fetch or an error.
     """
 
-    type: Literal["final_answer", "fetch_logs", "error"]
     data: FinalAnswer | FetchLogs | Error
 
 
@@ -312,8 +302,10 @@ def create_query():
             {"role": "user", "content": query},
         ]
 
-        max_attempts = 11
-        for _ in range(max_attempts):
+        max_attempts = (
+            10  # Maximum number of attempts or chat conversations to resolve the query
+        )
+        for _ in range(max_attempts + 1):
             response = openai.beta.chat.completions.parse(
                 model="gpt-4o",
                 messages=messages,
@@ -330,21 +322,20 @@ def create_query():
             logger.info(f"OpenAI response: {response}")
 
             if response.finish_reason == "stop":
+                # recieved final answer from GPT
                 openai_response = response.message.parsed
-                logger.info(f"OpenAI response: {openai_response}")
 
-                if openai_response.type == "final_answer" and isinstance(
-                    openai_response.data, FinalAnswer
-                ):
+                if isinstance(openai_response.data, FinalAnswer):
                     final_answer = openai_response.data.answer
+                    logger.info(f"Final ansewer: {final_answer}")
+
                     response_model = QueryResponse(query=query, answer=final_answer)
                     return jsonify(response_model.model_dump())
 
-                elif openai_response.type == "fetch_logs" and isinstance(
-                    openai_response.data, FetchLogs
-                ):
+                elif isinstance(openai_response.data, FetchLogs):
                     fetch_logs = openai_response.data.list
-                    logger.info(f"Logs fetched: {fetch_logs}")
+                    logger.info(f"Fetch logs for: {fetch_logs}")
+
                     logs = []
                     for log in fetch_logs:
                         logs.append(
@@ -354,16 +345,21 @@ def create_query():
                                 **(log.optional_params or {}),
                             )
                         )
-                    return jsonify({"query": query, "result": logs})
+                    logger.info(f"Fetched logs: {logs}")
 
-                elif openai_response.type == "error" and isinstance(
-                    openai_response.data, Error
-                ):
+                    logs = "\n".join(logs)
+                    response_model = QueryResponse(query=query, answer=logs)
+                    return jsonify(response_model.model_dump())
+
+                elif isinstance(openai_response.data, Error):
                     error_message = openai_response.data.message
                     logger.error(f"Error from GPT: {error_message}")
-                    return jsonify({"query": query, "result": "error"})
+
+                    response_model = QueryResponse(query=query, answer=error_message)
+                    return jsonify(response_model.model_dump())
 
             elif response.finish_reason == "tool_calls":
+                # openai requests cluster related information from the tool calls
                 messages.append(response.message)
 
                 for tool_call in response.message.tool_calls:
@@ -390,11 +386,12 @@ def create_query():
         # If max attempts exceeded, return an error message
         error_message = f"Query could not be resolved within {max_attempts} attempts."
         logger.error(error_message)
-        return jsonify({"query": query, "result": "unknown"})
+        response_model = QueryResponse(query=query, answer=error_message)
+        return jsonify(response_model.model_dump())
 
     except Exception as e:
         logger.error(f"Error processing query: {e}")
-        return jsonify({"query": query, "result": "unknown"})
+        return jsonify({"query": query, "result": "Error "})
 
 
 if __name__ == "__main__":
