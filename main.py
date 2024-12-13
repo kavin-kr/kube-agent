@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Literal
+from typing import Literal, Optional
 from flask import Flask, request, jsonify
 import kubernetes
 from pydantic import BaseModel, Field, field_validator
@@ -12,14 +12,6 @@ import jq
 # Load environment variables
 load_dotenv()
 
-# # Configure logging
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s %(levelname)s - %(message)s",
-#     filename="agent.log",
-#     filemode="w",
-# )
-
 import logging.handlers
 
 logger = logging.getLogger()
@@ -28,20 +20,15 @@ logger.level = logging.INFO
 file_handler = logging.FileHandler("agent.log")
 logger.addHandler(file_handler)
 
-http_handler = logging.handlers.HTTPHandler(
-    "hot-polliwog-natural.ngrok-free.app",
-    "/log",
-    method="POST",
-    secure=True,
-)
-logger.addHandler(http_handler)
 
 # Configure Kubernetes client
 config.load_kube_config()
 
 
 def call_kubernetes_api(api_class: str, method: str, params: dict, jq_filter: str):
-    logger.info(f"Kubernetes API call: {api_class}.{method}({params}) with filter {jq_filter}")
+    logger.info(
+        f"Kubernetes API call: {api_class}.{method}({params}) with filter {jq_filter}"
+    )
     try:
         api_instance = getattr(kubernetes.client, api_class)()
         api_method = getattr(api_instance, method)
@@ -119,12 +106,34 @@ class CallKubernetesAPI(BaseModel):
             )
 
 
+class ReadNamespacedPodLogParams(BaseModel):
+    """
+    Represents the params to fetch logs for a specific pod or a container within a pod using `read_namespaced_pod_log` API.
+    The `optional_params` field can be used to provide additional parameters like container name, tail lines, etc.
+    """
+
+    pod_name: str = Field(..., description="The name of the pod to fetch logs for.")
+    namespace: str = Field(..., description="The namespace of the pod.")
+    optional_params: dict | None = Field(
+        ..., description="Optional parameters for fetching logs."
+    )
+
+
+class FetchLogs(BaseModel):
+    """
+    Represents the logs fetched for a specific pod or container within a pod.
+    """
+
+    list: list[ReadNamespacedPodLogParams]
+
+
 class FinalAnswer(BaseModel):
     """
     Represents the final answer to a user query, that can be sent back to the user.
     """
 
     answer: str
+
 
 class Error(BaseModel):
     """
@@ -139,8 +148,8 @@ class OpenAIResponse(BaseModel):
     Represents the response from the OpenAI API, which can include the final answer, a count list, or logs.
     """
 
-    type: Literal["final_answer", "error"]
-    data: FinalAnswer | Error
+    type: Literal["final_answer", "fetch_logs", "error"]
+    data: FinalAnswer | FetchLogs | Error
 
 
 # Fine-tuned system prompt for GPT
@@ -171,6 +180,9 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
    - If ambiguous or unclear, use best judgment to interpret user intent.
    - Recognize Kubernetes keywords and their relationships.
    - Based on the Kubernetes API documentation understand the relationships between resources such as pods, deployments, services, and statefulsets and their fields in API response. Pay attention to labels, selectors, and metadata that link different resources together.
+   - For fetching the logs, identify the pod name, namespace, and any optional parameters like container name, tail lines, etc. and return the params to the `read_namespaced_pod_log` in the user output.
+   - Based on the user query, use `jq_filter` such that it always include metadata like names, labels, and other context other that the requested resource to answer the query correct. Make sure the filter is intelligent enough to filter the information along with the metadata needed to answer the query.
+
 
 2. **Identify the Appropriate `api_class`, `method`, `params`, and `jq_filter`**
 
@@ -187,7 +199,6 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
 
    2. **Generate a Valid jq Filter**:
       - Use a jq filter to extract relevant information along with the metadata from the Kubernetes API response.
-      - NOTE: Always include metadata like names, labels, and other context information needed to answer the query.
       - **Guidelines for jq Filters**:
         - Ensure the jq output is always a valid JSON object or array.
         - Always include the metadata for each resource and its nested resource which will be needed to answer the query (e.g., name, namespace, labels).
@@ -227,6 +238,7 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
    - Minimize API calls by batching requests or reusing data where possible.
 
 4. **Process Results for Concise Answers**:
+   - If the final answer is to output logs of pods or containers, return the params to the `read_namespaced_pod_log` in the user output.
    - Provide single-word or numeric answers without forming complete sentences when possible (e.g., 'Running', '3').
    - For lists, return comma-separated items (e.g., 'item1, item2').
    - Use meaningful labels like 'app' or 'component' instead of Kubernetes-generated suffixes.
@@ -320,6 +332,22 @@ def create_query():
                     final_answer = openai_response.data.answer
                     response_model = QueryResponse(query=query, answer=final_answer)
                     return jsonify(response_model.model_dump())
+
+                elif openai_response.type == "fetch_logs" and isinstance(
+                    openai_response.data, FetchLogs
+                ):
+                    fetch_logs = openai_response.data.list
+                    logger.info(f"Logs fetched: {fetch_logs}")
+                    logs = []
+                    for log in fetch_logs:
+                        logs.append(
+                            kubernetes.client.CoreV1Api().read_namespaced_pod_log(
+                                log.pod_name,
+                                log.namespace,
+                                **(log.optional_params or {}),
+                            )
+                        )
+                    return jsonify({"query": query, "result": logs})
 
                 elif openai_response.type == "error" and isinstance(
                     openai_response.data, Error
