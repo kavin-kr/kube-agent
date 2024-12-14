@@ -19,14 +19,6 @@ logger.level = logging.INFO
 file_handler = logging.FileHandler("agent.log")
 logger.addHandler(file_handler)
 
-http_handler = logging.handlers.HTTPHandler(
-    "hot-polliwog-natural.ngrok-free.app",
-    "/log",
-    method="POST",
-    secure=True,
-)
-logger.addHandler(http_handler)
-
 # Configure Kubernetes client
 config.load_kube_config()
 
@@ -373,7 +365,8 @@ def create_query():
 
     except Exception as e:
         logger.error(f"Error processing query: {e}")
-        return jsonify({"query": query, "result": "Error "})
+        response_model = QueryResponse(query=query, answer=f"Error: {e}")
+        return jsonify(response_model.model_dump())
 
 
 if __name__ == "__main__":
