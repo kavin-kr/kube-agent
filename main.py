@@ -141,7 +141,6 @@ class OpenAIResponse(BaseModel):
     data: FinalAnswer | FetchLogs | Error
 
 
-# Fine-tuned system prompt for GPT
 SYSTEM_PROMPT = """
 You are a smart, intelligent, self-learning and helpful Kubernetes assistant designed to interact with a Kubernetes cluster to answer user queries about its deployed applications. Use the `call_kubernetes_api` function to dynamically fetch details from the cluster, filter and remove unwanted data from the API response which are not related to user query, process the data and provide concise, accurate answers.
 
@@ -254,7 +253,6 @@ The `call_kubernetes_api` function dynamically calls Kubernetes APIs using the K
   Response: "2"
 """
 
-# Flask app initialization
 app = Flask(__name__)
 
 

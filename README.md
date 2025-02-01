@@ -1,84 +1,90 @@
-# Cleric Query Agent Assignment
+<h1 align="center">kube-agent</h1>
 
-## Introduction
-This document outlines the requirements and guidelines for the Cleric Query Agent Assignment. Your task is to develop an AI agent capable of accurately answering queries about applications deployed on a Kubernetes cluster.
+kube-agent is an intelligent assistant designed to interact with your Kubernetes cluster and answer queries about its deployed applications. It dynamically calls Kubernetes APIs using the Kubernetes Python Client library to provide concise and accurate responses based on your input.
 
-## Objective
-Create an AI agent that interacts with a Kubernetes cluster to answer queries about its deployed applications.
+## Requirements
+- Python 3.10
+- A running Kubernetes cluster with its kubeconfig file located at `~/.kube/config`
+- [OpenAI API Key](https://platform.openai.com/docs/quickstart)
 
-## Assignment Details
+## Setup and Usage
+1. **Clone the repository:**
+   ```sh
+   git clone https://github.com/kavin-kr/kube-agent.git
+   cd kube-agent
+   ```
+2. **Install the required packages:**
+   ```sh
+   pip install -r requirements.txt
+   ```
+3. **Configure the OpenAI API Key:**
+   - Option 1: Set Environment Variable via Terminal
+     ```sh
+     export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+     ```
+   - Option 2: Use the .env File
+     ```sh
+     cp .env.template .env
+     # Then, replace the OPENAI_API_KEY value in the .env file with your actual API key
+     ```
+4. **Ensure Your Kubernetes Cluster is Running:**
 
-### Technical Requirements
-- Use Python 3.10
-- The kubeconfig file will be located at `~/.kube/config`
-- Utilize GPT-4 or a model with comparable performance for natural language processing
+   The kubeconfig file should be located at `~/.kube/config`. If needed, you can start a local cluster using [Minikube](https://minikube.sigs.k8s.io/docs/start).
+   ```sh
+   minikube start
+   ```
+5. **Deploy Applications:**
 
-### API Specifications
-Your agent should provide a POST endpoint for query submission:
+   Make sure some applications are deployed on your Kubernetes cluster so that those resources can be queried by the agent.
+6. **Run kube-agent:**
+   ```sh
+   python main.py
+   ```
+
+## API Specifications
+kube-agent responds to user queries via an HTTP POST endpoint.
+
+#### Request:
 - URL: `http://localhost:8000/query`
-- Port: 8000
+- Method: POST
 - Payload format:
   ```json
   {
       "query": "How many pods are in the default namespace?"
   }
   ```
-- Response format (using Pydantic):
-  ```python
-  from pydantic import BaseModel
 
-  class QueryResponse(BaseModel):
-      query: str
-      answer: str
-  ```
+#### Response:
+```json
+{
+    "query": "How many pods are in the default namespace?",
+    "answer": "2"
+}
+```
 
-### Scope of Queries
-- Queries will require only read actions from your agent
-- Topics may include status, information, or logs of resources deployed on Minikube
-- Answers will not change dynamically
-- Approximately 10 queries will be asked
-- Queries are independent of each other
-- Return only the answer, without identifiers (e.g., "mongodb" instead of "mongodb-56c598c8fc")
+## Supported Queries
+The agent can answer various queries related to the status, information, or logs of resources deployed on the Kubernetes cluster. Some examples include:
 
-## Submission Guidelines
-Submit your repository to [submission link](https://query-agent-assignment-validator-347704744679.us-central1.run.app/)
- - The validator will return your score within a few minutes
- - Use logging if you want to check your outputs, make sure write logs to `agent.log`
- - If you encounter errors, wait a few minutes before retrying
- - Do not refresh the browser to avoid losing your session
- - Make sure to note your `Submission ID` for the Google form for the final submission.
-
-### Submission Requirements
-1. GitHub Repository
-   - Include a `README.md` file describing your approach
-   - Ensure your main script is named `main.py`
-2. Loom Video
-   - Keep it informal and personal
-   - Focus on your motivation and background
-3. Submit the `Loom video` and `submission ID` for the final submission on this [Google Form Link](https://docs.google.com/forms/d/e/1FAIpQLScUpEklWG-hYCIsBFo9pD-SAtyaCsevhQSz6XRLKkLV_K3KuQ/viewform?usp=sf_link)
-
-## Submission Deadline:
-There is no specific deadline for submitting this assignment;  however, we expect it to be completed within a **reasonable amount of time**. 
-- We understand that personal and professional responsibilities can take priority, 
-and we encourage you to balance this assignment with your other commitments. 
-- Please aim to submit your work once you feel confident in your solution and it aligns with the objectives.
-
-## Testing Your Agent
-We recommend testing your agent locally before submission:
-1. Install [Minikube](https://minikube.sigs.k8s.io/docs/start/)
-2. Set up a local Kubernetes cluster
-3. Deploy sample applications
-4. Run your agent and test with sample queries
-
-## Evaluation Criteria
-- Accuracy of answers
-- Code quality and organization
-- Clarity of explanation in README and video
-
-## Example Queries and Responses
 1. Q: "Which pod is spawned by my-deployment?"
    A: "my-pod"
 2. Q: "What is the status of the pod named 'example-pod'?"
    A: "Running"
 3. Q: "How many nodes are there in the cluster?"
    A: "2"
+
+## How It Works
+
+1. **Determining the API Call:**
+   Based on the user query, kube-agent identifies the relevant Kubernetes API call to fetch the required data. It determines the appropriate `api_class`, `method`, and `parameters` needed for the Kubernetes Python client.
+
+2. **OpenAI Function Calling with RAG:**
+   kube-agent leverages a Retrieval-Augmented Generation (RAG) approach by combining real-time data retrieval with OpenAI's function calling capabilities. This process ensures that the agent fetches the most current information from your Kubernetes cluster by invoking the appropriate API call with the determined parameters.
+
+3. **Filtering API Responses:**
+   The response from the Kubernetes API may contain excessive information that might not fit within the limitations of OpenAI's API context window. To address this, the agent provides a `jq_filter` along with the `api_class`, `method`, and `params`. This filter extracts only the essential information required to answer your query from the Kubernetes API response, keeping the context window concise and within manageable limits.
+
+4. **Processing the Filtered Output:**
+   The filtered output is processed by OpenAI through function calling, which then provides the final answer to the user query.
+
+5. **Robust Error Handling:**
+   If an API call fails - due to issues such as an incorrect `api_class` or method - the agent is designed to recover by trying alternative methods or adjusting parameters. This ensures that even if one approach fails, kube-agent can still retrieve and process the necessary information.
